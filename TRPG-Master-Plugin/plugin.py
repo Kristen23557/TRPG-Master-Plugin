@@ -29,6 +29,7 @@ user_registry = {}    # {qq_number: uid}
 character_db = {}     # {rid: character_data}
 npc_db = {}           # {npc_id: npc_data}
 combat_sessions = {}  # {session_id: combat_data}
+save_db = {}          # {save_id: save_data}
 
 # --- 常量定义 ---
 PLUGIN_DIR = Path(__file__).parent.absolute()
@@ -88,6 +89,10 @@ def generate_npc_id() -> str:
     """生成NPC ID"""
     return f"NPC{random.randint(1000, 9999)}"
 
+def generate_save_id() -> str:
+    """生成6位存档ID"""
+    return str(random.randint(100000, 999999))
+
 def load_user_registry():
     """加载用户注册表"""
     global user_registry
@@ -132,6 +137,32 @@ def delete_character(rid: str):
         file_path.unlink()
     if rid in character_db:
         del character_db[rid]
+
+def load_save_db():
+    """加载存档数据库"""
+    global save_db
+    save_db = {}
+    for file in SAVES_DIR.glob("*.json"):
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                save_db[data['save_id']] = data
+        except:
+            continue
+
+def save_save_data(save_data: Dict):
+    """保存存档数据"""
+    file_path = SAVES_DIR / f"{save_data['save_id']}.json"
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
+
+def delete_save(save_id: str):
+    """删除存档"""
+    file_path = SAVES_DIR / f"{save_id}.json"
+    if file_path.exists():
+        file_path.unlink()
+    if save_id in save_db:
+        del save_db[save_id]
 
 async def load_plot_content(plot_name: str) -> Optional[str]:
     """加载剧本内容 - 仅支持txt文件"""
@@ -223,6 +254,62 @@ def get_user_characters(user_id: str) -> List[Dict]:
             user_characters.append(character)
     return user_characters
 
+def get_user_saves_count(user_uid: str) -> int:
+    """获取用户未完成存档数量"""
+    count = 0
+    for save_data in save_db.values():
+        if save_data.get('creator_uid') == user_uid and save_data.get('status') == 'incomplete':
+            count += 1
+    return count
+
+def get_user_saves_list(user_uid: str) -> List[Dict]:
+    """获取用户的存档列表"""
+    user_saves = []
+    for save_data in save_db.values():
+        if save_data.get('creator_uid') == user_uid and save_data.get('status') == 'incomplete':
+            user_saves.append({
+                'save_id': save_data['save_id'],
+                'plot_name': save_data['plot_name'],
+                'save_time': save_data['save_time'],
+                'player_count': len(save_data.get('players', [])),
+                'mode': save_data.get('mode', 'coc')
+            })
+    return user_saves
+
+def generate_random_character(mode: str, name: str = "随机角色") -> Dict:
+    """生成随机角色"""
+    rid = generate_rid()
+    attributes = {}
+    
+    if mode == "coc":
+        for attr in RULES["coc"]["attributes"]:
+            min_val, max_val = RULES["coc"]["attribute_ranges"][attr]
+            attributes[attr] = random.randint(min_val, max_val)
+    else:  # dnd
+        for attr in RULES["dnd"]["attributes"]:
+            min_val, max_val = RULES["dnd"]["attribute_ranges"][attr]
+            attributes[attr] = random.randint(min_val, max_val)
+    
+    character_data = {
+        "rid": rid,
+        "name": name,
+        "profession": "随机职业",
+        "attributes": attributes,
+        "creator_uid": "system",  # 系统生成的角色
+        "mode": mode,
+        "created_time": datetime.now().isoformat(),
+        "hp": 100,
+        "mp": 100 if mode == "coc" else 0,
+        "status": "normal",
+        "is_random": True  # 标记为随机生成的角色
+    }
+    
+    # 保存角色
+    character_db[rid] = character_data
+    save_character(character_data)
+    
+    return character_data
+
 # === 全局帮助命令 ===
 class TRPGHelpCommand(BaseCommand):
     """TRPG全局帮助命令"""
@@ -234,24 +321,22 @@ class TRPGHelpCommand(BaseCommand):
     
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         """显示全局帮助菜单"""
-        help_text = """
-🎲 **TRPG跑团插件全局帮助菜单** 🎲
+        help_text = """🎲 **TRPG跑团插件全局帮助** 🎲
 
-📚 **剧本管理命令:**
+📚 **剧本管理:**
 `/start <模式> plot=<剧本名> [roles=<人数>]` - 开始新剧本
+`/load <存档ID>` - 加载存档继续游戏
 `/join <剧本ID>` - 加入剧本
-`/save <存档名>` - 保存游戏进度
-
-👤 **用户管理:**
-`/register` - 用户注册（请私聊使用）
+`/save` - 保存游戏进度
+`/save list` - 查看我的存档
 
 🎭 **角色管理:**
 `/role create <模式> <角色名> [职业] {属性}` - 创建角色
-`/role load <RID>` - 加载已有角色到当前剧本
-`/role list` - 查看我的所有角色
+`/role load <RID>` - 加载角色到当前剧本
+`/role list` - 查看我的角色
 `/role view <RID>` - 查看角色详情
 `/role delete <RID>` - 删除角色
-`/role help` - 角色命令帮助
+`/status` - 查看当前角色状态
 
 🎲 **游戏命令:**
 `/check <检定类型> [adv|dis]` - 进行检定
@@ -260,28 +345,28 @@ class TRPGHelpCommand(BaseCommand):
 `/npc <动作> [参数]` - NPC管理
 `/item <动作> [参数]` - 物品管理
 
-📖 **剧情命令:**
-发送"推进剧情"、"继续故事"、"下一步"等关键词自动推进剧情
+👤 **用户命令:**
+`/register` - 用户注册（私聊使用）
+`/plot list` - 查看可用剧本
 
-💡 **使用说明:**
-- 所有命令后添加 `help` 参数可查看该命令详细帮助
-- 例: `/check help`, `/role help`, `/combat help`
-- 帮助命令无需加入剧本即可使用
+🛠️ **团长命令:**
+`/kick force <UID> [dr|sr]` - 踢出玩家
+`/skip prepare` - 跳过准备阶段
 
-🎯 **快速开始:**
-1. 私聊使用 `/register` 注册
-2. 使用 `/role create` 创建角色
-3. 使用 `/start coc plot=剧本名` 开始游戏
-4. 其他玩家使用 `/join 剧本ID` 加入
-5. 使用 `/role load RID` 加载角色到剧本
-6. 开始冒险！
+💡 **规则说明:**
+- CoC模式: 使用D100骰子，属性范围15-90
+- DnD模式: 使用D20骰子，属性范围8-20
+- 优势/劣势检定: adv/dis参数
+- 每个用户最多3个CoC和3个DnD角色
 
-📝 **提示:** 将.txt剧本文件放入插件目录的plots文件夹即可使用
-        """
+📝 **提示:**
+- 所有命令后加 `help` 查看详细帮助
+- 剧本文件需为.txt格式放在plots目录
+- 存档仅限团长和管理员操作"""
         await self.send_text(help_text)
         return True, "显示全局帮助", True
 
-# === 修改后的RoleCommand ===
+# === 角色管理命令 ===
 class RoleCommand(BaseCommand):
     """角色管理命令"""
     
@@ -438,6 +523,7 @@ class RoleCommand(BaseCommand):
         for player in current_session["players"]:
             if player["qq"] == user_id:
                 player["character_rid"] = rid
+                player["ready"] = True  # 标记为准备就绪
                 break
                 
         # 显示详细属性
@@ -453,7 +539,22 @@ class RoleCommand(BaseCommand):
             f"📊 属性详情:\n{attr_display}"
         )
         
+        # 检查是否所有玩家都准备就绪
+        if current_session["status"] == "preparing":
+            await self._check_all_ready(current_session)
+        
         return True, "角色加载成功", True
+    
+    async def _check_all_ready(self, session: Dict):
+        """检查是否所有玩家都准备就绪"""
+        all_ready = all(player.get("ready", False) for player in session["players"])
+        if all_ready:
+            session["status"] = "playing"
+            await self.send_text(
+                f"🎉 **所有玩家准备就绪！**\n"
+                f"游戏正式开始！\n\n"
+                f"使用 `/check` 进行检定，发送剧情关键词推进故事"
+            )
     
     async def _list_characters(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
         """列出用户的所有角色"""
@@ -551,8 +652,7 @@ class RoleCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示角色帮助"""
-        help_text = """
-🎭 **角色命令帮助**
+        help_text = """🎭 **角色命令帮助**
 
 **创建角色:**
 `/role create <模式> <角色名> [职业] {属性列表}`
@@ -588,12 +688,11 @@ class RoleCommand(BaseCommand):
 
 **💡 提示:**
 - 每个用户最多可创建3个CoC角色和3个DnD角色
-- 创建角色无需加入剧本，但加载角色需要先加入剧本
-        """
+- 创建角色无需加入剧本，但加载角色需要先加入剧本"""
         await self.send_text(help_text)
         return True, "显示帮助", True
 
-# === 修改后的CheckCommand，区分CoC和DnD检定规则 ===
+# === 检定命令 ===
 class CheckCommand(BaseCommand):
     """检定命令"""
     
@@ -802,8 +901,7 @@ class CheckCommand(BaseCommand):
     
     async def _show_help(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
         """显示检定帮助"""
-        help_text = """
-🎲 **检定命令帮助**
+        help_text = """🎲 **检定命令帮助**
 
 **基础检定:**
 `/check <检定类型>`
@@ -821,12 +919,11 @@ class CheckCommand(BaseCommand):
 - **属性检定:** 力量检定, 敏捷检定, 体质检定, 智力检定, 意志检定, 感知检定, 魅力检定
 - **技能检定:** 侦查, 图书馆使用, 心理学, 潜行, 格斗, 手枪, 闪避, 医学, 神秘学等
 
-**注意:** 需要在剧本中使用，且需要有角色
-        """
+**注意:** 需要在剧本中使用，且需要有角色"""
         await self.send_text(help_text)
         return True, "显示检定帮助", True
 
-# === 其他命令类（完整保留）===
+# === 开始剧本命令 ===
 class StartCommand(BaseCommand):
     """开始新剧本命令"""
     
@@ -837,6 +934,18 @@ class StartCommand(BaseCommand):
     
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         try:
+            # 获取聊天流信息
+            chat_stream = getattr(self, 'chat_stream', None)
+            if chat_stream is None:
+                # 尝试从message对象获取
+                message_obj = getattr(self, 'message', None)
+                if message_obj:
+                    chat_stream = getattr(message_obj, 'chat_stream', None)
+            
+            if chat_stream is None:
+                await self.send_text("❌ 无法获取聊天上下文信息")
+                return False, "缺少聊天上下文", True
+                
             user_id = self.message.message_info.user_info.user_id
             
             mode = self.matched_groups.get("mode", "").lower()
@@ -877,7 +986,7 @@ class StartCommand(BaseCommand):
                 
             # 生成会话
             session_id = generate_session_id()
-            stream_id = getattr(self.chat_stream, 'stream_id', 'unknown')
+            stream_id = getattr(chat_stream, 'stream_id', 'unknown')
             
             active_sessions[session_id] = {
                 "session_id": session_id,
@@ -886,6 +995,7 @@ class StartCommand(BaseCommand):
                 "plot_content": plot_content[:5000],
                 "max_players": roles,
                 "creator": user_id,
+                "creator_uid": user_registry[str(user_id)],
                 "stream_id": stream_id,
                 "players": [],
                 "npcs": [],
@@ -893,7 +1003,8 @@ class StartCommand(BaseCommand):
                 "status": "recruiting",
                 "current_progress": "开始",
                 "created_time": datetime.now().isoformat(),
-                "last_activity": datetime.now().isoformat()
+                "last_activity": datetime.now().isoformat(),
+                "is_new_game": True  # 标记为新游戏
             }
             
             # 发送召集消息
@@ -923,22 +1034,60 @@ class StartCommand(BaseCommand):
             session = active_sessions[session_id]
             if session["status"] == "recruiting":
                 if len(session["players"]) > 0:
-                    session["status"] = "character_creation"
+                    session["status"] = "preparing"
                     await self.send_text(
-                        f"🎉 **剧本 {session_id} 开始！**\n"
+                        f"🎉 **剧本 {session_id} 进入准备阶段！**\n"
                         f"📖 剧本: {session['plot_name']}\n"
                         f"🎮 模式: {session['mode'].upper()}\n\n"
-                        f"请各位玩家使用 `/role create` 创建角色\n"
-                        f"使用 `/role help` 查看角色创建帮助"
+                        f"⏰ 准备阶段: 5分钟\n"
+                        f"请各位玩家使用 `/role create` 创建角色或 `/role load` 加载已有角色\n"
+                        f"使用 `/role help` 查看角色创建帮助\n\n"
+                        f"团长可使用 `/skip prepare` 提前结束准备阶段"
                     )
+                    
+                    # 开始准备阶段倒计时
+                    asyncio.create_task(self._start_preparing_phase(session_id))
                 else:
                     await self.send_text("❌ 没有玩家加入，剧本自动取消")
                     del active_sessions[session_id]
     
+    async def _start_preparing_phase(self, session_id: str):
+        """开始准备阶段"""
+        await asyncio.sleep(300)  # 5分钟
+        
+        if session_id in active_sessions:
+            session = active_sessions[session_id]
+            if session["status"] == "preparing":
+                # 为没有角色的玩家生成随机角色
+                for player in session["players"]:
+                    if not player.get("character_rid"):
+                        random_char = generate_random_character(session["mode"], f"玩家{player['qq']}")
+                        player["character_rid"] = random_char["rid"]
+                        player["ready"] = True
+                        
+                        # 发送随机角色信息
+                        mode = session["mode"]
+                        attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
+                                                for attr, value in random_char['attributes'].items()])
+                        
+                        await self.send_text(
+                            f"🎲 **为玩家 {player['qq']} 生成了随机角色**\n"
+                            f"🎭 名称: {random_char['name']}\n"
+                            f"🏷️ 职业: {random_char['profession']}\n"
+                            f"🆔 RID: {random_char['rid']}\n"
+                            f"📊 属性详情:\n{attr_display}"
+                        )
+                
+                session["status"] = "playing"
+                await self.send_text(
+                    f"⏰ **准备阶段结束！**\n"
+                    f"游戏正式开始！\n\n"
+                    f"使用 `/check` 进行检定，发送剧情关键词推进故事"
+                )
+    
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示开始剧本帮助"""
-        help_text = """
-🎭 **开始剧本命令帮助**
+        help_text = """🎭 **开始剧本命令帮助**
 
 **使用方法:**
 `/start <模式> plot=<剧本名> [roles=<人数>]`
@@ -954,11 +1103,225 @@ class StartCommand(BaseCommand):
 
 **注意:**
 - 需要先注册才能开始剧本
-- 剧本文件必须是.txt格式，放在plots目录
-        """
+- 剧本文件必须是.txt格式，放在plots目录"""
         await self.send_text(help_text)
         return True, "显示开始剧本帮助", True
 
+# === 加载存档命令 ===
+class LoadCommand(BaseCommand):
+    """加载存档命令"""
+    
+    command_name = "load"
+    command_description = "加载存档继续游戏"
+    command_pattern = r"^/load\s+(?P<save_id>\d{6})(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            save_id = self.matched_groups.get("save_id")
+            
+            # 处理help参数
+            if save_id == "help":
+                return await self._show_help()
+                
+            user_id = self.message.message_info.user_info.user_id
+            
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+            
+            if save_id not in save_db:
+                await self.send_text("❌ 存档ID不存在")
+                return False, "存档不存在", True
+                
+            save_data = save_db[save_id]
+            user_uid = user_registry[str(user_id)]
+            
+            # 检查权限：只有团长或管理员可以加载存档
+            if save_data.get('creator_uid') != user_uid and not is_admin(user_id, self.plugin):
+                await self.send_text("❌ 您不是该存档的创建者，无法加载")
+                return False, "权限不足", True
+            
+            # 获取聊天流信息
+            chat_stream = getattr(self, 'chat_stream', None)
+            if chat_stream is None:
+                message_obj = getattr(self, 'message', None)
+                if message_obj:
+                    chat_stream = getattr(message_obj, 'chat_stream', None)
+            
+            if chat_stream is None:
+                await self.send_text("❌ 无法获取聊天上下文信息")
+                return False, "缺少聊天上下文", True
+                
+            stream_id = getattr(chat_stream, 'stream_id', 'unknown')
+            
+            # 创建新会话
+            session_id = generate_session_id()
+            active_sessions[session_id] = {
+                "session_id": session_id,
+                "mode": save_data["mode"],
+                "plot_name": save_data["plot_name"],
+                "plot_content": save_data.get("plot_content", ""),
+                "max_players": save_data.get("max_players", 4),
+                "creator": user_id,
+                "creator_uid": user_uid,
+                "stream_id": stream_id,
+                "players": [],
+                "npcs": save_data.get("npcs", []),
+                "items": save_data.get("items", []),
+                "status": "recruiting",
+                "current_progress": save_data.get("current_progress", "继续游戏"),
+                "created_time": datetime.now().isoformat(),
+                "last_activity": datetime.now().isoformat(),
+                "is_new_game": False,  # 标记为加载存档
+                "save_id": save_id,    # 关联的存档ID
+                "original_players": save_data.get("players", [])  # 保存原始玩家数据
+            }
+            
+            # 发送召集消息
+            original_player_count = len(save_data.get("players", []))
+            await self.send_text(
+                f"💾 **加载存档继续游戏！**\n"
+                f"📁 存档: `{save_id}`\n"
+                f"📖 剧本: `{save_data['plot_name']}`\n"
+                f"📜 剧本ID: `{session_id}`\n"
+                f"🎮 模式: {save_data['mode'].upper()}\n"
+                f"👥 原玩家数: {original_player_count}人\n"
+                f"⏰ 召集时间: 1分钟\n\n"
+                f"原玩家将自动匹配角色，新玩家可选择剩余角色\n"
+                f"请使用 `/join {session_id}` 加入游戏！"
+            )
+            
+            # 设置定时器
+            asyncio.create_task(self._start_session_after_delay(session_id))
+            
+            return True, "加载存档成功", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 加载存档失败: {str(e)}")
+            return False, f"加载失败: {str(e)}", True
+    
+    async def _start_session_after_delay(self, session_id: str):
+        """1分钟后自动开始准备阶段"""
+        await asyncio.sleep(60)
+        
+        if session_id in active_sessions:
+            session = active_sessions[session_id]
+            if session["status"] == "recruiting":
+                if len(session["players"]) > 0:
+                    session["status"] = "preparing"
+                    
+                    # 自动为原玩家匹配角色
+                    original_players = session.get("original_players", [])
+                    current_players = session["players"]
+                    
+                    matched_count = 0
+                    for current_player in current_players:
+                        for original_player in original_players:
+                            if current_player["uid"] == original_player.get("uid"):
+                                if original_player.get("character_rid"):
+                                    current_player["character_rid"] = original_player["character_rid"]
+                                    current_player["ready"] = True
+                                    matched_count += 1
+                                    break
+                    
+                    await self.send_text(
+                        f"🎉 **剧本 {session_id} 进入准备阶段！**\n"
+                        f"📖 剧本: {session['plot_name']}\n"
+                        f"🎮 模式: {session['mode'].upper()}\n"
+                        f"🔗 自动匹配角色: {matched_count}人\n\n"
+                        f"⏰ 准备阶段: 5分钟\n"
+                        f"已自动匹配角色的玩家准备就绪\n"
+                        f"其他玩家请使用 `/role load` 选择角色或创建新角色\n\n"
+                        f"团长可使用 `/skip prepare` 提前结束准备阶段"
+                    )
+                    
+                    # 开始准备阶段倒计时
+                    asyncio.create_task(self._start_preparing_phase(session_id))
+                else:
+                    await self.send_text("❌ 没有玩家加入，剧本自动取消")
+                    del active_sessions[session_id]
+    
+    async def _start_preparing_phase(self, session_id: str):
+        """开始准备阶段"""
+        await asyncio.sleep(300)  # 5分钟
+        
+        if session_id in active_sessions:
+            session = active_sessions[session_id]
+            if session["status"] == "preparing":
+                # 为没有角色的玩家分配剩余角色或生成随机角色
+                original_players = session.get("original_players", [])
+                available_characters = []
+                
+                # 收集未被选择的原角色
+                for original_player in original_players:
+                    character_rid = original_player.get("character_rid")
+                    if character_rid and character_rid not in [p.get("character_rid") for p in session["players"] if p.get("character_rid")]:
+                        available_characters.append(character_rid)
+                
+                # 为没有角色的玩家分配角色
+                for player in session["players"]:
+                    if not player.get("character_rid"):
+                        if available_characters:
+                            # 分配剩余的原角色
+                            character_rid = available_characters.pop(0)
+                            player["character_rid"] = character_rid
+                            player["ready"] = True
+                            
+                            character = character_db.get(character_rid, {})
+                            await self.send_text(
+                                f"🎭 **为玩家 {player['qq']} 分配了剩余角色**\n"
+                                f"📝 名称: {character.get('name', '未知角色')}\n"
+                                f"🆔 RID: {character_rid}"
+                            )
+                        else:
+                            # 生成随机角色
+                            random_char = generate_random_character(session["mode"], f"玩家{player['qq']}")
+                            player["character_rid"] = random_char["rid"]
+                            player["ready"] = True
+                            
+                            mode = session["mode"]
+                            attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
+                                                    for attr, value in random_char['attributes'].items()])
+                            
+                            await self.send_text(
+                                f"🎲 **为玩家 {player['qq']} 生成了随机角色**\n"
+                                f"🎭 名称: {random_char['name']}\n"
+                                f"🏷️ 职业: {random_char['profession']}\n"
+                                f"🆔 RID: {random_char['rid']}\n"
+                                f"📊 属性详情:\n{attr_display}"
+                            )
+                
+                session["status"] = "playing"
+                await self.send_text(
+                    f"⏰ **准备阶段结束！**\n"
+                    f"游戏继续！\n\n"
+                    f"使用 `/check` 进行检定，发送剧情关键词推进故事"
+                )
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示加载存档帮助"""
+        help_text = """💾 **加载存档命令帮助**
+
+**使用方法:**
+`/load <存档ID>`
+
+**参数说明:**
+- 存档ID: 6位数字的存档标识符
+
+**示例:**
+`/load 123456`
+
+**注意:**
+- 需要先注册才能加载存档
+- 只有存档创建者或管理员可以加载
+- 使用 `/save list` 查看自己的存档列表"""
+        await self.send_text(help_text)
+        return True, "显示加载存档帮助", True
+
+# === 加入剧本命令 ===
 class JoinCommand(BaseCommand):
     """加入剧本命令"""
     
@@ -1009,6 +1372,7 @@ class JoinCommand(BaseCommand):
                 "uid": user_registry[str(user_id)],
                 "joined_time": datetime.now().isoformat(),
                 "character_rid": None,
+                "ready": False,
                 "status": "alive"
             }
             session["players"].append(player_data)
@@ -1027,8 +1391,7 @@ class JoinCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示加入剧本帮助"""
-        help_text = """
-🎭 **加入剧本命令帮助**
+        help_text = """🎭 **加入剧本命令帮助**
 
 **使用方法:**
 `/join <剧本ID>`
@@ -1042,11 +1405,151 @@ class JoinCommand(BaseCommand):
 **注意:**
 - 需要先注册才能加入剧本
 - 只能在剧本招募阶段加入
-- 使用 `/trpg` 查看如何获取剧本ID
-        """
+- 使用 `/trpg` 查看如何获取剧本ID"""
         await self.send_text(help_text)
         return True, "显示加入剧本帮助", True
 
+# === 存档命令 ===
+class SaveCommand(BaseCommand):
+    """存档命令"""
+    
+    command_name = "save"
+    command_description = "保存游戏进度"
+    command_pattern = r"^/save(?:\s+(?P<action>\w+))?(?:\s+(?P<params>.+))?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            user_id = self.message.message_info.user_info.user_id
+            
+            action = self.matched_groups.get("action", "")
+            params = self.matched_groups.get("params", "")
+            
+            # 处理help参数
+            if action == "help":
+                return await self._show_help()
+                
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+            
+            if action == "list":
+                return await self._list_saves(user_id)
+            elif not action:  # 无参数时为保存
+                return await self._save_game(user_id)
+            else:
+                await self.send_text("❌ 未知操作，使用 `/save help` 查看帮助")
+                return False, "未知操作", True
+                
+        except Exception as e:
+            await self.send_text(f"❌ 存档操作失败: {str(e)}")
+            return False, f"存档操作失败: {str(e)}", True
+    
+    async def _save_game(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
+        """保存游戏"""
+        # 查找用户当前会话
+        current_session = None
+        for session in active_sessions.values():
+            if any(player["qq"] == user_id for player in session["players"]):
+                current_session = session
+                break
+                
+        if not current_session:
+            await self.send_text("❌ 您没有在活跃的剧本中")
+            return False, "无会话", True
+            
+        # 权限检查：只有团长或管理员可以保存
+        if not is_session_creator(user_id, current_session["session_id"]) and not is_admin(user_id, self.plugin):
+            await self.send_text("❌ 只有团长或管理员可以保存游戏")
+            return False, "权限不足", True
+            
+        # 生成存档ID
+        save_id = generate_save_id()
+        
+        # 创建存档数据
+        save_data = {
+            "save_id": save_id,
+            "session_id": current_session["session_id"],
+            "plot_name": current_session["plot_name"],
+            "plot_content": current_session.get("plot_content", ""),
+            "mode": current_session["mode"],
+            "max_players": current_session["max_players"],
+            "players": current_session["players"],
+            "npcs": current_session["npcs"],
+            "items": current_session.get("items", []),
+            "current_progress": current_session["current_progress"],
+            "save_time": datetime.now().isoformat(),
+            "creator": current_session["creator"],
+            "creator_uid": current_session["creator_uid"],
+            "status": "incomplete"
+        }
+        
+        # 保存到数据库和文件
+        save_db[save_id] = save_data
+        save_save_data(save_data)
+        
+        await self.send_text(
+            f"💾 **游戏已保存！**\n"
+            f"📁 存档ID: {save_id}\n"
+            f"📜 剧本: {current_session['plot_name']}\n"
+            f"👥 玩家数: {len(current_session['players'])}\n"
+            f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"💡 使用 `/load {save_id}` 加载此存档继续游戏"
+        )
+        
+        return True, "游戏保存成功", True
+    
+    async def _list_saves(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
+        """列出用户的存档"""
+        user_uid = user_registry.get(str(user_id))
+        if not user_uid:
+            await self.send_text("❌ 您还没有注册")
+            return False, "未注册", True
+            
+        user_saves = get_user_saves_list(user_uid)
+        
+        if not user_saves:
+            await self.send_text("📁 您还没有任何存档")
+            return True, "无存档", True
+            
+        save_list = "📁 **您的存档列表**\n\n"
+        
+        for save in user_saves:
+            save_time = datetime.fromisoformat(save['save_time']).strftime('%m-%d %H:%M')
+            save_list += (
+                f"🆔 **{save['save_id']}**\n"
+                f"📖 {save['plot_name']} ({save['mode'].upper()})\n"
+                f"👥 {save['player_count']}人 · ⏰ {save_time}\n\n"
+            )
+        
+        save_list += "💡 使用 `/load 存档ID` 加载存档继续游戏"
+        
+        await self.send_text(save_list)
+        return True, "显示存档列表", True
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示存档帮助"""
+        help_text = """💾 **存档命令帮助**
+
+**保存游戏:**
+`/save` - 保存当前游戏进度
+
+**查看存档列表:**
+`/save list` - 查看我的所有存档
+
+**加载存档:**
+`/load <存档ID>` - 加载存档继续游戏
+
+**注意:**
+- 保存游戏需要团长或管理员权限
+- 需要在剧本中使用
+- 存档ID为6位数字，使用 `/save list` 查看"""
+        await self.send_text(help_text)
+        return True, "显示存档帮助", True
+
+# === 注册命令 ===
 class RegisterCommand(BaseCommand):
     """用户注册命令"""
     
@@ -1086,6 +1589,334 @@ class RegisterCommand(BaseCommand):
             await self.send_text(f"❌ 注册失败: {str(e)}")
             return False, f"注册失败: {str(e)}", True
 
+# === 状态查询命令 ===
+class StatusCommand(BaseCommand):
+    """状态查询命令"""
+    
+    command_name = "status"
+    command_description = "查看当前角色状态"
+    command_pattern = r"^/status(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            user_id = self.message.message_info.user_info.user_id
+            
+            # 处理help参数
+            if hasattr(self, 'matched_groups') and self.matched_groups and self.matched_groups.get(0) == "help":
+                return await self._show_help()
+                
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+                
+            # 查找用户当前角色
+            current_session, character = await self._get_user_character(user_id)
+            if not character:
+                await self.send_text("❌ 您没有在活跃的剧本中或有角色")
+                return False, "无角色", True
+                
+            mode = character["mode"]
+            attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
+                                    for attr, value in character['attributes'].items()])
+            
+            # 显示物品
+            items_text = "无"
+            if character.get("items"):
+                items_text = "\n".join([f"  - {item['name']} x{item['quantity']}" for item in character["items"]])
+            
+            status_text = (
+                f"🎭 **角色状态详情**\n\n"
+                f"📝 名称: {character['name']}\n"
+                f"🏷️ 职业: {character.get('profession', '无')}\n"
+                f"🆔 RID: {character['rid']}\n"
+                f"🎮 模式: {mode.upper()}\n"
+                f"❤️ HP: {character['hp']}\n"
+                f"🔮 MP: {character.get('mp', 0)}\n"
+                f"📅 创建时间: {character['created_time'][:10]}\n\n"
+                f"📊 **属性详情:**\n{attr_display}\n\n"
+                f"📦 **物品:**\n{items_text}"
+            )
+            
+            await self.send_text(status_text)
+            return True, "显示角色状态", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 查询状态失败: {str(e)}")
+            return False, f"状态查询失败: {str(e)}", True
+    
+    async def _get_user_character(self, user_id: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """获取用户当前角色"""
+        for session in active_sessions.values():
+            for player in session["players"]:
+                if player["qq"] == user_id and player["character_rid"]:
+                    return session, character_db[player["character_rid"]]
+        return None, None
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示状态帮助"""
+        help_text = """📊 **状态命令帮助**
+
+**使用方法:**
+`/status` - 查看当前角色完整状态
+
+**显示内容:**
+- 角色基本信息
+- 所有属性值
+- 当前HP/MP
+- 拥有的物品
+
+**注意:**
+- 需要在剧本中使用
+- 需要有角色才能查看"""
+        await self.send_text(help_text)
+        return True, "显示状态帮助", True
+
+# === 剧本列表命令 ===
+class PlotListCommand(BaseCommand):
+    """剧本列表命令"""
+    
+    command_name = "plot_list"
+    command_description = "查看可用剧本列表"
+    command_pattern = r"^/plot\s+list(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            # 处理help参数
+            if hasattr(self, 'matched_groups') and self.matched_groups and self.matched_groups.get(0) == "help":
+                return await self._show_help()
+                
+            available_plots = get_available_plots()
+            
+            if not available_plots:
+                await self.send_text(
+                    f"📚 **可用剧本列表**\n\n"
+                    f"暂无剧本文件\n\n"
+                    f"💡 请将.txt剧本文件放入目录: {PLOTS_DIR}"
+                )
+                return True, "无剧本文件", True
+            
+            plot_list = "📚 **可用剧本列表**\n\n"
+            for plot in available_plots:
+                plot_list += f"• {plot}\n"
+            
+            plot_list += f"\n💡 使用 `/start <模式> plot=剧本名` 开始游戏"
+            
+            await self.send_text(plot_list)
+            return True, "显示剧本列表", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 获取剧本列表失败: {str(e)}")
+            return False, f"获取剧本列表失败: {str(e)}", True
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示剧本列表帮助"""
+        help_text = """📚 **剧本列表命令帮助**
+
+**使用方法:**
+`/plot list` - 查看所有可用剧本
+
+**注意:**
+- 剧本文件需为.txt格式
+- 将剧本文件放入plugins/TRPG_Plugin/plots/目录
+- 使用剧本文件名（不含路径）开始游戏"""
+        await self.send_text(help_text)
+        return True, "显示剧本列表帮助", True
+
+# === 跳过准备阶段命令 ===
+class SkipPrepareCommand(BaseCommand):
+    """跳过准备阶段命令"""
+    
+    command_name = "skip_prepare"
+    command_description = "跳过准备阶段"
+    command_pattern = r"^/skip\s+prepare(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            user_id = self.message.message_info.user_info.user_id
+            
+            # 处理help参数
+            if hasattr(self, 'matched_groups') and self.matched_groups and self.matched_groups.get(0) == "help":
+                return await self._show_help()
+                
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+                
+            # 查找用户当前会话
+            current_session = None
+            for session in active_sessions.values():
+                if any(player["qq"] == user_id for player in session["players"]):
+                    current_session = session
+                    break
+                    
+            if not current_session:
+                await self.send_text("❌ 您没有在活跃的剧本中")
+                return False, "无会话", True
+                
+            # 权限检查：只有团长或管理员可以跳过
+            if not is_session_creator(user_id, current_session["session_id"]) and not is_admin(user_id, self.plugin):
+                await self.send_text("❌ 只有团长或管理员可以跳过准备阶段")
+                return False, "权限不足", True
+                
+            if current_session["status"] != "preparing":
+                await self.send_text("❌ 当前不在准备阶段")
+                return False, "不在准备阶段", True
+            
+            # 为没有角色的玩家生成随机角色
+            for player in current_session["players"]:
+                if not player.get("character_rid"):
+                    random_char = generate_random_character(current_session["mode"], f"玩家{player['qq']}")
+                    player["character_rid"] = random_char["rid"]
+                    player["ready"] = True
+                    
+                    mode = current_session["mode"]
+                    attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
+                                            for attr, value in random_char['attributes'].items()])
+                    
+                    await self.send_text(
+                        f"🎲 **为玩家 {player['qq']} 生成了随机角色**\n"
+                        f"🎭 名称: {random_char['name']}\n"
+                        f"🏷️ 职业: {random_char['profession']}\n"
+                        f"🆔 RID: {random_char['rid']}\n"
+                        f"📊 属性详情:\n{attr_display}"
+                    )
+            
+            current_session["status"] = "playing"
+            await self.send_text(
+                f"⏩ **准备阶段已跳过！**\n"
+                f"游戏正式开始！\n\n"
+                f"使用 `/check` 进行检定，发送剧情关键词推进故事"
+            )
+            
+            return True, "跳过准备阶段成功", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 跳过准备阶段失败: {str(e)}")
+            return False, f"跳过失败: {str(e)}", True
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示跳过准备阶段帮助"""
+        help_text = """⏩ **跳过准备阶段命令帮助**
+
+**使用方法:**
+`/skip prepare` - 强制结束准备阶段，开始游戏
+
+**注意:**
+- 需要团长或管理员权限
+- 未准备角色的玩家将被分配随机角色
+- 只能在准备阶段使用"""
+        await self.send_text(help_text)
+        return True, "显示跳过准备阶段帮助", True
+
+# === 踢出玩家命令 ===
+class KickCommand(BaseCommand):
+    """踢出玩家命令"""
+    
+    command_name = "kick"
+    command_description = "踢出玩家"
+    command_pattern = r"^/kick\s+force\s+(?P<target_uid>\d+)(?:\s+(?P<option>dr|sr))?(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            user_id = self.message.message_info.user_info.user_id
+            target_uid = self.matched_groups.get("target_uid")
+            option = self.matched_groups.get("option", "sr")  # 默认保存角色
+            
+            # 处理help参数
+            if target_uid == "help":
+                return await self._show_help()
+                
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+                
+            # 查找用户当前会话
+            current_session = None
+            for session in active_sessions.values():
+                if any(player["qq"] == user_id for player in session["players"]):
+                    current_session = session
+                    break
+                    
+            if not current_session:
+                await self.send_text("❌ 您没有在活跃的剧本中")
+                return False, "无会话", True
+                
+            # 权限检查：只有团长或管理员可以踢人
+            if not is_session_creator(user_id, current_session["session_id"]) and not is_admin(user_id, self.plugin):
+                await self.send_text("❌ 只有团长或管理员可以踢出玩家")
+                return False, "权限不足", True
+            
+            # 查找目标玩家
+            target_player = None
+            for player in current_session["players"]:
+                if player["uid"] == target_uid:
+                    target_player = player
+                    break
+            
+            if not target_player:
+                await self.send_text("❌ 未找到该UID的玩家")
+                return False, "玩家不存在", True
+                
+            # 执行踢出操作
+            target_qq = target_player["qq"]
+            character_rid = target_player.get("character_rid")
+            
+            if option == "dr" and character_rid:  # 删除角色
+                delete_character(character_rid)
+                action_text = "并删除了其角色"
+            else:  # 保存角色
+                action_text = "其角色已保存"
+            
+            # 从会话中移除玩家
+            current_session["players"] = [p for p in current_session["players"] if p["uid"] != target_uid]
+            
+            await self.send_text(
+                f"🚪 **已踢出玩家**\n"
+                f"👤 QQ: {target_qq}\n"
+                f"🆔 UID: {target_uid}\n"
+                f"📝 {action_text}"
+            )
+            
+            return True, "踢出玩家成功", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 踢出玩家失败: {str(e)}")
+            return False, f"踢出失败: {str(e)}", True
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示踢出玩家帮助"""
+        help_text = """🚪 **踢出玩家命令帮助**
+
+**使用方法:**
+`/kick force <目标UID> [dr|sr]`
+
+**参数说明:**
+- 目标UID: 要踢出玩家的UID
+- dr: 删除玩家的角色（慎用）
+- sr: 保存玩家的角色（默认）
+
+**示例:**
+`/kick force 12345678` - 踢出玩家但保存角色
+`/kick force 12345678 dr` - 踢出玩家并删除角色
+
+**注意:**
+- 需要团长或管理员权限
+- 需要在剧本中使用
+- 删除角色操作不可逆，请谨慎使用"""
+        await self.send_text(help_text)
+        return True, "显示踢出玩家帮助", True
+
+# === 骰子命令 ===
 class DiceCommand(BaseCommand):
     """骰子命令"""
     
@@ -1127,8 +1958,7 @@ class DiceCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示掷骰帮助"""
-        help_text = """
-🎲 **掷骰命令帮助**
+        help_text = """🎲 **掷骰命令帮助**
 
 **使用方法:**
 `/dice D<面数>`
@@ -1136,11 +1966,11 @@ class DiceCommand(BaseCommand):
 
 **说明:**
 - 面数范围: 2-1000
-- 无需加入剧本即可使用
-        """
+- 无需加入剧本即可使用"""
         await self.send_text(help_text)
         return True, "显示掷骰帮助", True
 
+# === 战斗管理命令 ===
 class CombatCommand(BaseCommand):
     """战斗管理命令"""
     
@@ -1332,8 +2162,7 @@ class CombatCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示战斗帮助"""
-        help_text = """
-⚔️ **战斗命令帮助**
+        help_text = """⚔️ **战斗命令帮助**
 
 **开始战斗:**
 `/combat start` - 开始战斗（仅团长）
@@ -1349,11 +2178,11 @@ class CombatCommand(BaseCommand):
 
 **注意:**
 - 需要在剧本中使用
-- 部分命令需要团长权限
-        """
+- 部分命令需要团长权限"""
         await self.send_text(help_text)
         return True, "显示战斗帮助", True
 
+# === NPC管理命令 ===
 class NPCCommand(BaseCommand):
     """NPC管理命令"""
     
@@ -1484,8 +2313,7 @@ class NPCCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示NPC帮助"""
-        help_text = """
-🎭 **NPC管理命令帮助**
+        help_text = """🎭 **NPC管理命令帮助**
 
 **创建NPC:**
 `/npc create <名称> <类型> {属性}`
@@ -1499,11 +2327,11 @@ class NPCCommand(BaseCommand):
 
 **注意:**
 - 需要团长或管理员权限
-- 需要在剧本中使用
-        """
+- 需要在剧本中使用"""
         await self.send_text(help_text)
         return True, "显示NPC帮助", True
 
+# === 物品管理命令 ===
 class ItemCommand(BaseCommand):
     """物品管理命令"""
     
@@ -1615,8 +2443,7 @@ class ItemCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示物品帮助"""
-        help_text = """
-📦 **物品管理命令帮助**
+        help_text = """📦 **物品管理命令帮助**
 
 **给予物品:**
 `/item give <玩家QQ> <物品名> [数量]`
@@ -1627,113 +2454,20 @@ class ItemCommand(BaseCommand):
 
 **注意:**
 - 给予物品需要团长或管理员权限
-- 需要在剧本中使用
-        """
+- 需要在剧本中使用"""
         await self.send_text(help_text)
         return True, "显示物品帮助", True
 
-class SaveCommand(BaseCommand):
-    """存档命令"""
-    
-    command_name = "save"
-    command_description = "保存游戏进度"
-    command_pattern = r"^/save\s+(?P<save_name>\S+)(?:\s+help)?$"
-    intercept_message = True
-    
-    async def execute(self) -> Tuple[bool, Optional[str], bool]:
-        try:
-            user_id = self.message.message_info.user_info.user_id
-            
-            save_name = self.matched_groups.get("save_name", "")
-            
-            # 处理help参数
-            if save_name == "help":
-                return await self._show_help()
-                
-            # 检查用户注册（非help命令需要注册）
-            registered, msg = check_user_registered(user_id)
-            if not registered:
-                await self.send_text(msg)
-                return False, "用户未注册", True
-                
-            # 查找用户当前会话
-            current_session = None
-            for session in active_sessions.values():
-                if any(player["qq"] == user_id for player in session["players"]):
-                    current_session = session
-                    break
-                    
-            if not current_session:
-                await self.send_text("❌ 您没有在活跃的剧本中")
-                return False, "无会话", True
-                
-            # 权限检查
-            if not is_session_creator(user_id, current_session["session_id"]) and not is_admin(user_id, self.plugin):
-                await self.send_text("❌ 只有团长或管理员可以保存游戏")
-                return False, "权限不足", True
-                
-            # 创建存档数据
-            save_data = {
-                "save_name": save_name,
-                "session_id": current_session["session_id"],
-                "plot_name": current_session["plot_name"],
-                "mode": current_session["mode"],
-                "players": current_session["players"],
-                "npcs": current_session["npcs"],
-                "current_progress": current_session["current_progress"],
-                "save_time": datetime.now().isoformat(),
-                "creator": current_session["creator"]
-            }
-            
-            # 保存到文件
-            save_file = SAVES_DIR / f"{save_name}_{current_session['session_id']}.json"
-            with open(save_file, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
-            
-            await self.send_text(
-                f"💾 **游戏已保存！**\n"
-                f"📁 存档名: {save_name}\n"
-                f"📜 剧本: {current_session['plot_name']}\n"
-                f"👥 玩家数: {len(current_session['players'])}\n"
-                f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            
-            return True, "游戏保存成功", True
-            
-        except Exception as e:
-            await self.send_text(f"❌ 保存失败: {str(e)}")
-            return False, f"保存失败: {str(e)}", True
-    
-    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
-        """显示存档帮助"""
-        help_text = """
-💾 **存档命令帮助**
-
-**使用方法:**
-`/save <存档名>`
-
-**参数说明:**
-- 存档名: 存档的名称，不能包含空格
-
-**示例:**
-`/save 第一章结束`
-
-**注意:**
-- 需要团长或管理员权限
-- 需要在剧本中使用
-        """
-        await self.send_text(help_text)
-        return True, "显示存档帮助", True
-
+# === 剧情推进器（修改为短篇幅）===
 class PlotAdvancer(BaseAction):
-    """剧情推进器"""
+    """剧情推进器 - 短篇幅版本"""
     
     action_name = "plot_advancer"
     action_description = "根据当前剧情条件推进故事发展"
     
     focus_activation_type = ActionActivationType.LLM_JUDGE
     normal_activation_type = ActionActivationType.KEYWORD
-    activation_keywords = ["推进剧情", "继续故事", "下一步"]
+    activation_keywords = ["推进剧情", "继续故事", "下一步", "继续"]
     
     mode_enable = ChatMode.ALL
     parallel_action = False
@@ -1764,10 +2498,14 @@ class PlotAdvancer(BaseAction):
             if not current_session:
                 return False, "未找到当前游戏会话"
                 
-            # 调用AI模型推进剧情
+            # 调用AI模型推进剧情（短篇幅）
             plot_response = await self._advance_plot(current_session)
             if plot_response:
-                await self.send_text(f"📖 **剧情推进**\n\n{plot_response}")
+                # 限制在85字左右
+                if len(plot_response) > 100:
+                    plot_response = plot_response[:97] + "..."
+                    
+                await self.send_text(f"📖 {plot_response}")
                 current_session['last_activity'] = datetime.now().isoformat()
                 return True, "剧情推进成功"
             else:
@@ -1777,25 +2515,21 @@ class PlotAdvancer(BaseAction):
             return False, f"剧情推进错误: {str(e)}"
     
     async def _advance_plot(self, session: Dict) -> Optional[str]:
-        """使用AI模型推进剧情"""
+        """使用AI模型推进剧情 - 短篇幅版本"""
         api_url = self.get_config("llm.api_url")
         api_key = self.get_config("llm.api_key")
         model = self.get_config("llm.plot_model")
         temperature = self.get_config("llm.temperature")
         
         prompt = f"""
-你是一位专业的{session['mode'].upper()}跑团主持人。请根据以下信息推进剧情：
+你是一位专业的{session['mode'].upper()}跑团主持人。请根据以下信息简短推进剧情（限85字内）：
 
 当前剧本：{session['plot_name']}
-剧本内容：{session['plot_content'][:3000]}...
 当前进度：{session['current_progress']}
 游戏模式：{session['mode'].upper()}
 
-玩家角色：
-{', '.join([character_db[player['character_rid']]['name'] for player in session['players'] if player['character_rid']])}
-
-请生成下一阶段的剧情发展，保持原剧本风格，提供生动的场景描述和NPC互动。
-回复请使用中文，保持叙事连贯性。
+请生成下一阶段的简短剧情发展，保持原剧本风格。
+回复请使用中文，控制在85字以内，保持简洁生动。
 """
         headers = {
             "Content-Type": "application/json",
@@ -1805,11 +2539,11 @@ class PlotAdvancer(BaseAction):
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "你是一位专业的TRPG游戏主持人"},
+                {"role": "system", "content": "你是一位专业的TRPG游戏主持人，回复简短精炼"},
                 {"role": "user", "content": prompt}
             ],
             "temperature": temperature,
-            "max_tokens": 1000
+            "max_tokens": 150  # 限制输出长度
         }
         
         try:
@@ -1824,7 +2558,7 @@ class PlotAdvancer(BaseAction):
         except Exception as e:
             print(f"AI API调用失败: {e}")
             
-        return None
+        return "故事继续发展，前方等待你们的是新的挑战..."
 
 # === 插件主类 ===
 @register_plugin
@@ -1877,6 +2611,10 @@ class TRPGPlugin(BasePlugin):
         super().__init__(*args, **kwargs)
         print(f"🔧 TRPG插件初始化中...")
         self._ensure_config_exists()
+        # 加载所有数据
+        load_user_registry()
+        load_character_db()
+        load_save_db()
         print(f"✅ TRPG插件初始化完成")
     
     def _ensure_config_exists(self):
@@ -1916,46 +2654,29 @@ class TRPGPlugin(BasePlugin):
         }
         
         try:
-            # 添加配置文件的注释说明
             config_content = f"""# TRPG跑团插件配置文件
 # 配置版本: {self.plugin_version}
 # 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-# 插件基础配置
 [plugin]
-# 是否启用插件
 enabled = {str(default_config["plugin"]["enabled"]).lower()}
-# 自动清理存档天数
 auto_clean_days = {default_config["plugin"]["auto_clean_days"]}
 
-# AI模型配置
 [llm]
-# 剧情推进模型
 plot_model = "{default_config["llm"]["plot_model"]}"
-# 模型API地址  
 api_url = "{default_config["llm"]["api_url"]}"
-# API密钥（需要时填写）
 api_key = "{default_config["llm"]["api_key"]}"
-# 生成随机性 (0.0-1.0)
 temperature = {default_config["llm"]["temperature"]}
 
-# 游戏规则配置
 [game]
-# 默认规则模式 (coc/dnd)
 default_mode = "{default_config["game"]["default_mode"]}"
-# 最大玩家数
 max_players = {default_config["game"]["max_players"]}
 
-# 战斗系统配置
 [combat]
-# 回合超时时间(秒)
 round_timeout = {default_config["combat"]["round_timeout"]}
-# 启用自动先攻
 enable_auto_initiative = {str(default_config["combat"]["enable_auto_initiative"]).lower()}
 
-# 管理员配置
 [admin]
-# 管理员QQ号列表
 admin_users = {default_config["admin"]["admin_users"]}
 """
             
@@ -1966,7 +2687,6 @@ admin_users = {default_config["admin"]["admin_users"]}
             
         except Exception as e:
             print(f"❌ 创建配置文件失败: {e}")
-            # 如果格式化写入失败，尝试直接写入 TOML
             try:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     toml.dump(default_config, f)
@@ -1977,13 +2697,18 @@ admin_users = {default_config["admin"]["admin_users"]}
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """注册所有插件组件"""
         components = [
-            (TRPGHelpCommand.get_command_info(), TRPGHelpCommand),  # 新增全局帮助命令
+            (TRPGHelpCommand.get_command_info(), TRPGHelpCommand),
             (StartCommand.get_command_info(), StartCommand),
+            (LoadCommand.get_command_info(), LoadCommand),
             (JoinCommand.get_command_info(), JoinCommand),
             (SaveCommand.get_command_info(), SaveCommand),
             (RegisterCommand.get_command_info(), RegisterCommand),
             (RoleCommand.get_command_info(), RoleCommand),
             (CheckCommand.get_command_info(), CheckCommand),
+            (StatusCommand.get_command_info(), StatusCommand),
+            (PlotListCommand.get_command_info(), PlotListCommand),
+            (SkipPrepareCommand.get_command_info(), SkipPrepareCommand),
+            (KickCommand.get_command_info(), KickCommand),
             (DiceCommand.get_command_info(), DiceCommand),
             (CombatCommand.get_command_info(), CombatCommand),
             (NPCCommand.get_command_info(), NPCCommand),
@@ -1992,10 +2717,6 @@ admin_users = {default_config["admin"]["admin_users"]}
         ]
         print(f"📋 TRPG插件注册了 {len(components)} 个组件")
         return components
-
-# 初始化数据
-load_user_registry()
-load_character_db()
 
 # 定时清理任务
 async def cleanup_old_saves():
@@ -2014,6 +2735,9 @@ async def cleanup_old_saves():
                 save_time = datetime.fromisoformat(save_data.get('save_time', '2000-01-01'))
                 if save_time < cutoff_time:
                     save_file.unlink()
+                    save_id = save_data.get('save_id')
+                    if save_id in save_db:
+                        del save_db[save_id]
                     print(f"已清理旧存档: {save_file.name}")
             except:
                 continue
