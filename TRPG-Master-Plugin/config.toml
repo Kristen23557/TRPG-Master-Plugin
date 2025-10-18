@@ -1,0 +1,40 @@
+# TRPG跑团插件配置文件
+# 配置版本: 1.0.0
+# 生成时间: 2024-01-01 00:00:00
+
+# 插件基础配置
+[plugin]
+# 是否启用插件
+enabled = true
+# 自动清理存档天数
+auto_clean_days = 10
+
+# AI模型配置
+[llm]
+# 剧情推进模型
+plot_model = "Qwen/Qwen2.5-14B-Instruct"
+# 模型API地址
+api_url = "https://api.siliconflow.cn/v1/chat/completions"
+# API密钥（需要时填写）
+api_key = ""
+# 生成随机性 (0.0-1.0)
+temperature = 0.8
+
+# 游戏规则配置
+[game]
+# 默认规则模式 (coc/dnd)
+default_mode = "coc"
+# 最大玩家数
+max_players = 6
+
+# 战斗系统配置
+[combat]
+# 回合超时时间(秒)
+round_timeout = 120
+# 启用自动先攻
+enable_auto_initiative = true
+
+# 管理员配置
+[admin]
+# 管理员QQ号列表
+admin_users = [2785185004]

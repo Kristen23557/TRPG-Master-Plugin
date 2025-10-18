@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "name": "TRPG-Master-Plugin",
+  "version": "1.0.0",
+  "description": "让麦麦成为你的赛博KP/DM！支持CoC和DnD规则的跑团插件，包含完整的角色创建、检定、战斗和剧本系统",
+  "author": {
+    "name": "KArabella",
+    "url": "https://github.com/Kristen23557"
+  },
+  "license": "MIT License",
+  "host_application": {
+    "min_version": "0.10.0",
+    "max_version": "0.10.3"
+  },
+  "keywords": ["trpg", "divination","moderation"],
+  "categories": ["Entertainment & Interaction"],
+  "repository_url": "https://github.com/Kristen23557/TRPG-Master-Plugin",
+  "default_locale": "zh-CN",
+  "locales_path": "_locales"
+}
