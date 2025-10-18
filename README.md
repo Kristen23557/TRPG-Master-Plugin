@@ -35,6 +35,7 @@ enable_auto_initiative = true     # 启用自动先攻
 admin_users = ["123456789"]       # 管理员QQ号列表
 
 剧本配置
+
 准备剧本文件
 创建 .txt 格式的剧本文件
 放置在 plots/ 目录下
@@ -42,6 +43,7 @@ admin_users = ["123456789"]       # 管理员QQ号列表
 
 🎮 使用指南
 🆕 新手入门流程
+
 1. 用户注册
 bash
 # 私聊机器人进行注册（保护隐私）
@@ -49,15 +51,15 @@ bash
 💡 注册后会获得唯一UID，用于角色管理
 
 2. 创建角色
-bash
+
 # CoC角色示例（侦探）
 /role create coc 张三 侦探 {str:60;con:70;dex:50;app:65;pow:75;siz:55;int:80;edu:85;luck:50}
-
 # DnD角色示例（战士）  
 /role create dnd 李四 战士 {力量:16;敏捷:14;体质:15;智力:10;感知:12;魅力:8}
 📝 每个用户最多创建3个CoC角色和3个DnD角色
 
 3. 开始游戏
+
 # 团长开始剧本（需要先准备剧本文件）
 /start coc plot=神秘庄园 roles=4
 # 玩家加入剧本（使用剧本ID）
@@ -66,6 +68,7 @@ bash
 /role load R12345
 
 4. 开始冒险
+
 # 进行技能检定
 /check 侦查
 /check 心理学
