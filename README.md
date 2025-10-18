@@ -35,11 +35,13 @@ NPC管理系统：团长可创建和管理NPC角色
 1. 用户注册
 # 私聊机器人进行注册(不私聊也行，但是建议私聊)
 /register
+
 2. 角色创建
 # 创建CoC角色
 /role create coc 张三 侦探 {str:60;con:70;dex:50;app:65;pow:75;siz:55;int:80;edu:85;luck:50}
 # 创建DnD角色  
 /role create dnd 李四 战士 {力量:16;敏捷:14;体质:15;智力:10;感知:12;魅力:8}
+
 3. 开始游戏
 # 团长开始剧本
 /start coc plot=神秘庄园 roles=4
@@ -47,6 +49,7 @@ NPC管理系统：团长可创建和管理NPC角色
 /join 123456
 # 加载角色到剧本
 /role load R12345
+
 4. 开始冒险
 # 进行检定
 /check 侦查
@@ -55,15 +58,18 @@ NPC管理系统：团长可创建和管理NPC角色
 /dice D20
 # 推进剧情
 （发送"推进剧情"、"继续故事"等关键词）
+
 📚 命令手册
 全局命令
 命令	说明	示例
 /trpg	显示全局帮助菜单	/trpg
+
 剧本管理
 命令	说明	示例
 /start	开始新剧本	/start coc plot=剧本名
 /join	加入剧本	/join 123456
 /save	保存游戏进度	/save 第一章结束
+
 角色管理
 命令	说明	示例
 /role create	创建角色	/role create coc 角色名 职业 {属性}
