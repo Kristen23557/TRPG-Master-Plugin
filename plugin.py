@@ -315,40 +315,6 @@ def generate_random_character(mode: str, name: str = "随机角色") -> Dict:
     
     return character_data
 
-def get_user_characters(user_id: str) -> List[Dict]:
-    """获取用户的所有角色"""
-    user_uid = user_registry.get(str(user_id))
-    if not user_uid:
-        return []
-    
-    user_characters = []
-    for character in character_db.values():
-        if character.get("creator_uid") == user_uid:
-            user_characters.append(character)
-    return user_characters
-
-def get_user_saves_count(user_uid: str) -> int:
-    """获取用户未完成存档数量"""
-    count = 0
-    for save_data in save_db.values():
-        if save_data.get('creator_uid') == user_uid and save_data.get('status') == 'incomplete':
-            count += 1
-    return count
-
-def get_user_saves_list(user_uid: str) -> List[Dict]:
-    """获取用户的存档列表"""
-    user_saves = []
-    for save_data in save_db.values():
-        if save_data.get('creator_uid') == user_uid and save_data.get('status') == 'incomplete':
-            user_saves.append({
-                'save_id': save_data['save_id'],
-                'plot_name': save_data['plot_name'],
-                'save_time': save_data['save_time'],
-                'player_count': len(save_data.get('players', [])),
-                'mode': save_data.get('mode', 'coc')
-            })
-    return user_saves
-
 # === 检定系统 ===
 class CheckSystem:
     """检定系统管理器"""
@@ -720,6 +686,179 @@ class PlotAdvancer:
         
         return "\n".join(suggestions[:4])  # 最多4个建议
 
+# === 智能KP驱动器 ===
+class IntelligentKPDriver:
+    """智能KP驱动器 - 在剧本框架内自由发挥"""
+    
+    def __init__(self, plugin_instance=None):
+        self.script_cache = {}
+        self.session_states = {}
+        self.plugin = plugin_instance  # 保存插件实例引用
+    
+    async def initialize_script(self, session_id: str, plot_name: str) -> bool:
+        """初始化剧本缓存"""
+        if session_id not in active_sessions:
+            return False
+        
+        plot_content = await load_plot_content(plot_name)
+        if not plot_content:
+            return False
+        
+        # 缓存完整剧本内容
+        self.script_cache[plot_name] = {
+            'content': plot_content,
+            'title': plot_name,
+            'loaded_time': datetime.now().isoformat()
+        }
+        
+        # 初始化会话状态
+        self.session_states[session_id] = {
+            'plot_name': plot_name,
+            'progress': 0,
+            'player_actions': [],
+            'discovered_clues': []
+        }
+        
+        return True
+    
+    async def generate_kp_response(self, session_id: str, player_action: str = "") -> str:
+        """生成简洁的KP响应（120字内）"""
+        if session_id not in self.session_states:
+            return "❌ 会话未初始化"
+        
+        session_state = self.session_states[session_id]
+        plot_name = session_state['plot_name']
+        
+        if plot_name not in self.script_cache:
+            return "❌ 剧本数据丢失"
+        
+        script_data = self.script_cache[plot_name]
+        
+        # 构建简洁提示词
+        prompt = self._build_concise_prompt(script_data, session_state, player_action)
+        
+        # 调用LLM生成简短响应
+        llm_response = await self._call_llm_api(prompt)
+        
+        if not llm_response:
+            llm_response = self._generate_fallback_response(session_state, player_action)
+        
+        # 确保响应在120字以内
+        if len(llm_response) > 120:
+            words = llm_response.split()
+            llm_response = ' '.join(words[:25]) + "..."
+        
+        # 更新状态
+        session_state['progress'] += 1
+        if player_action:
+            session_state['player_actions'].append(player_action[:20])
+        
+        return llm_response
+    
+    def _build_concise_prompt(self, script_data: Dict, session_state: Dict, player_action: str) -> str:
+        """构建简洁提示词"""
+        return f"""
+作为TRPG主持人，基于剧本框架内自由发挥。回复限120字内。
+
+剧本：{script_data['title']}
+进度：{session_state['progress']}
+玩家行动：{player_action if player_action else "观察"}
+
+要求：
+1. 在剧本框架内创造性发挥
+2. 回复生动简洁，120字内
+3. 为玩家提供行动选择
+4. 保持悬疑感和探索性
+
+生成KP叙述：
+"""
+    
+    async def _call_llm_api(self, prompt: str) -> Optional[str]:
+        """调用LLM API - 完整实现"""
+        try:
+            # 从插件配置获取API设置
+            api_url = self.plugin.get_config("llm.api_url", "")
+            api_key = self.plugin.get_config("llm.api_key", "")
+            model = self.plugin.get_config("llm.plot_model", "Qwen/Qwen2.5-14B-Instruct")
+            temperature = self.plugin.get_config("llm.temperature", 0.8)
+            
+            # 在方法开始处添加调试信息
+            print(f"🔧 调用LLM API: {api_url}")
+            print(f"🔧 使用模型: {model}")
+
+            # 检查必要的配置
+            if not api_url:
+                print("❌ LLM API URL 未配置")
+                return None
+            
+            if not api_key:
+                print("❌ LLM API Key 未配置")
+                return None
+            
+            # 构建请求头
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            # 构建请求体
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": temperature,
+                "max_tokens": 200,  # 限制输出长度
+                "stream": False
+            }
+            
+            # 发送请求
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(api_url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        
+                        # 解析响应（兼容不同API格式）
+                        if "choices" in result and len(result["choices"]) > 0:
+                            return result["choices"][0].get("message", {}).get("content", "").strip()
+                        elif "content" in result:
+                            return result["content"].strip()
+                        else:
+                            print(f"❌ 无法解析API响应: {result}")
+                            return None
+                    else:
+                        error_text = await response.text()
+                        print(f"❌ API请求失败: {response.status} - {error_text}")
+                        return None
+                        
+        except asyncio.TimeoutError:
+            print("❌ LLM API请求超时")
+            return None
+        except Exception as e:
+            print(f"❌ LLM API调用异常: {str(e)}")
+            return None
+    
+    def _generate_fallback_response(self, session_state: Dict, player_action: str) -> str:
+        """生成备用响应"""
+        base_responses = [
+            "你继续探索这个神秘房间。银色的墙壁在昏暗灯光下闪烁，空气中弥漫着陈旧的气息。",
+            "行动带来了新的发现。房间的每个角落都隐藏着线索，等待你的探索。",
+            "随着调查深入，更多谜团浮现。这个房间似乎不只是囚禁那么简单..."
+        ]
+        response = random.choice(base_responses)
+        
+        if player_action:
+            response = f"你{player_action}。{response}"
+        
+        return response
+
+# 全局KP驱动器实例
+kp_driver = None
+
 # === 全局帮助命令 ===
 class TRPGHelpCommand(BaseCommand):
     """TRPG全局帮助命令"""
@@ -739,6 +878,7 @@ class TRPGHelpCommand(BaseCommand):
 `/join <剧本ID>` - 加入剧本
 `/save` - 保存游戏进度
 `/save list` - 查看我的存档
+`/save delete <存档ID>` - 删除存档（团长/管理员）
 
 🎭 **角色管理:**
 `/role create <模式> <角色名> [职业] {属性}` - 创建角色
@@ -749,9 +889,9 @@ class TRPGHelpCommand(BaseCommand):
 `/status` - 查看当前角色状态
 
 🎲 **游戏命令:**
+`/action <行动描述>` - 执行行动推进剧情（智能KP）
 `/check <检定类型> [adv|dis|simulate]` - 进行检定
 `/dice check <检定ID>` - 执行检定掷骰
-`/action <行动描述>` - 执行行动推进剧情
 `/combat <动作> [目标]` - 战斗管理
 `/npc <动作> [参数]` - NPC管理
 `/item <动作> [参数]` - 物品管理
@@ -773,11 +913,12 @@ class TRPGHelpCommand(BaseCommand):
 📝 **提示:**
 - 所有命令后加 `help` 查看详细帮助
 - 剧本文件需为.txt格式放在plots目录
-- 存档仅限团长和管理员操作"""
+- 存档删除需要团长或管理员权限
+- 智能KP系统会在剧本框架内自由发挥生成剧情"""
         await self.send_text(help_text)
         return True, "显示全局帮助", True
 
-# === 开始剧本命令（添加help参数）===
+# === 开始剧本命令 ===
 class StartCommand(BaseCommand):
     """开始新剧本命令"""
     
@@ -862,6 +1003,9 @@ class StartCommand(BaseCommand):
                 "is_new_game": True  # 标记为新游戏
             }
             
+            # 初始化KP驱动器
+            await kp_driver.initialize_script(session_id, plot_name)
+            
             # 发送召集消息
             await self.send_text(
                 f"🎭 **新的{mode.upper()}剧本开始召集！**\n"
@@ -889,56 +1033,13 @@ class StartCommand(BaseCommand):
             session = active_sessions[session_id]
             if session["status"] == "recruiting":
                 if len(session["players"]) > 0:
-                    session["status"] = "preparing"
-                    await self.send_text(
-                        f"🎉 **剧本 {session_id} 进入准备阶段！**\n"
-                        f"📖 剧本: {session['plot_name']}\n"
-                        f"🎮 模式: {session['mode'].upper()}\n\n"
-                        f"⏰ 准备阶段: 5分钟\n"
-                        f"请各位玩家使用 `/role create` 创建角色或 `/role load` 加载已有角色\n"
-                        f"使用 `/role help` 查看角色创建帮助\n\n"
-                        f"团长可使用 `/skip prepare` 提前结束准备阶段"
-                    )
-                    
-                    # 开始准备阶段倒计时
-                    asyncio.create_task(self._start_preparing_phase(session_id))
+                    session["status"] = "playing"
+                    # 使用KP驱动器生成开场
+                    opening = await kp_driver.generate_kp_response(session_id)
+                    await self.send_text(f"🎉 **游戏开始！**\n\n{opening}")
                 else:
                     await self.send_text("❌ 没有玩家加入，剧本自动取消")
                     del active_sessions[session_id]
-    
-    async def _start_preparing_phase(self, session_id: str):
-        """开始准备阶段"""
-        await asyncio.sleep(300)  # 5分钟
-        
-        if session_id in active_sessions:
-            session = active_sessions[session_id]
-            if session["status"] == "preparing":
-                # 为没有角色的玩家生成随机角色
-                for player in session["players"]:
-                    if not player.get("character_rid"):
-                        random_char = generate_random_character(session["mode"], f"玩家{player['qq']}")
-                        player["character_rid"] = random_char["rid"]
-                        player["ready"] = True
-                        
-                        # 发送随机角色信息
-                        mode = session["mode"]
-                        attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
-                                                for attr, value in random_char['attributes'].items()])
-                        
-                        await self.send_text(
-                            f"🎲 **为玩家 {player['qq']} 生成了随机角色**\n"
-                            f"🎭 名称: {random_char['name']}\n"
-                            f"🏷️ 职业: {random_char['profession']}\n"
-                            f"🆔 RID: {random_char['rid']}\n"
-                            f"📊 属性详情:\n{attr_display}"
-                        )
-                
-                session["status"] = "playing"
-                await self.send_text(
-                    f"⏰ **准备阶段结束！**\n"
-                    f"游戏正式开始！\n\n"
-                    f"使用 `/action <行动描述>` 推进剧情，`/check` 进行检定"
-                )
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示开始剧本帮助"""
@@ -959,7 +1060,7 @@ class StartCommand(BaseCommand):
 **注意:**
 - 需要先注册才能开始剧本
 - 剧本文件必须是.txt格式，放在plots目录
-- 召集时间1分钟，准备时间5分钟"""
+- 召集时间1分钟，使用智能KP系统"""
         await self.send_text(help_text)
         return True, "显示开始剧本帮助", True
 
@@ -1037,6 +1138,13 @@ class LoadCommand(BaseCommand):
                 "original_players": save_data.get("players", [])  # 保存原始玩家数据
             }
             
+            # 恢复KP驱动器状态
+            if 'kp_driver_data' in save_data:
+                kp_driver.session_states[session_id] = save_data['kp_driver_data']
+            else:
+                # 初始化新的KP驱动器
+                await kp_driver.initialize_script(session_id, save_data["plot_name"])
+            
             # 发送召集消息
             original_player_count = len(save_data.get("players", []))
             await self.send_text(
@@ -1068,7 +1176,7 @@ class LoadCommand(BaseCommand):
             session = active_sessions[session_id]
             if session["status"] == "recruiting":
                 if len(session["players"]) > 0:
-                    session["status"] = "preparing"
+                    session["status"] = "playing"
                     
                     # 自动为原玩家匹配角色
                     original_players = session.get("original_players", [])
@@ -1085,78 +1193,15 @@ class LoadCommand(BaseCommand):
                                     break
                     
                     await self.send_text(
-                        f"🎉 **剧本 {session_id} 进入准备阶段！**\n"
+                        f"🎉 **剧本 {session_id} 游戏继续！**\n"
                         f"📖 剧本: {session['plot_name']}\n"
                         f"🎮 模式: {session['mode'].upper()}\n"
                         f"🔗 自动匹配角色: {matched_count}人\n\n"
-                        f"⏰ 准备阶段: 5分钟\n"
-                        f"已自动匹配角色的玩家准备就绪\n"
-                        f"其他玩家请使用 `/role load` 选择角色或创建新角色\n\n"
-                        f"团长可使用 `/skip prepare` 提前结束准备阶段"
+                        f"游戏继续！使用 `/action <行动>` 推进剧情"
                     )
-                    
-                    # 开始准备阶段倒计时
-                    asyncio.create_task(self._start_preparing_phase(session_id))
                 else:
                     await self.send_text("❌ 没有玩家加入，剧本自动取消")
                     del active_sessions[session_id]
-    
-    async def _start_preparing_phase(self, session_id: str):
-        """开始准备阶段"""
-        await asyncio.sleep(300)  # 5分钟
-        
-        if session_id in active_sessions:
-            session = active_sessions[session_id]
-            if session["status"] == "preparing":
-                # 为没有角色的玩家分配剩余角色或生成随机角色
-                original_players = session.get("original_players", [])
-                available_characters = []
-                
-                # 收集未被选择的原角色
-                for original_player in original_players:
-                    character_rid = original_player.get("character_rid")
-                    if character_rid and character_rid not in [p.get("character_rid") for p in session["players"] if p.get("character_rid")]:
-                        available_characters.append(character_rid)
-                
-                # 为没有角色的玩家分配角色
-                for player in session["players"]:
-                    if not player.get("character_rid"):
-                        if available_characters:
-                            # 分配剩余的原角色
-                            character_rid = available_characters.pop(0)
-                            player["character_rid"] = character_rid
-                            player["ready"] = True
-                            
-                            character = character_db.get(character_rid, {})
-                            await self.send_text(
-                                f"🎭 **为玩家 {player['qq']} 分配了剩余角色**\n"
-                                f"📝 名称: {character.get('name', '未知角色')}\n"
-                                f"🆔 RID: {character_rid}"
-                            )
-                        else:
-                            # 生成随机角色
-                            random_char = generate_random_character(session["mode"], f"玩家{player['qq']}")
-                            player["character_rid"] = random_char["rid"]
-                            player["ready"] = True
-                            
-                            mode = session["mode"]
-                            attr_display = "\n".join([f"  {RULES[mode]['attribute_names'].get(attr, attr)}: {value}" 
-                                                    for attr, value in random_char['attributes'].items()])
-                            
-                            await self.send_text(
-                                f"🎲 **为玩家 {player['qq']} 生成了随机角色**\n"
-                                f"🎭 名称: {random_char['name']}\n"
-                                f"🏷️ 职业: {random_char['profession']}\n"
-                                f"🆔 RID: {random_char['rid']}\n"
-                                f"📊 属性详情:\n{attr_display}"
-                            )
-                
-                session["status"] = "playing"
-                await self.send_text(
-                    f"⏰ **准备阶段结束！**\n"
-                    f"游戏继续！\n\n"
-                    f"使用 `/action <行动描述>` 推进剧情，`/check` 进行检定"
-                )
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示加载存档帮助"""
@@ -1266,12 +1311,12 @@ class JoinCommand(BaseCommand):
         await self.send_text(help_text)
         return True, "显示加入剧本帮助", True
 
-# === 存档命令 ===
-class SaveCommand(BaseCommand):
-    """存档命令"""
+# === 增强的存档命令 ===
+class EnhancedSaveCommand(BaseCommand):
+    """存档命令 - 增强版，添加删除功能"""
     
     command_name = "save"
-    command_description = "保存游戏进度"
+    command_description = "保存游戏进度或删除存档"
     command_pattern = r"^/save(?:\s+(?P<action>\w+))?(?:\s+(?P<params>.+))?$"
     intercept_message = True
     
@@ -1294,6 +1339,8 @@ class SaveCommand(BaseCommand):
             
             if action == "list":
                 return await self._list_saves(user_id)
+            elif action == "delete":
+                return await self._delete_save(user_id, params.strip())
             elif not action:  # 无参数时为保存
                 return await self._save_game(user_id)
             else:
@@ -1303,6 +1350,42 @@ class SaveCommand(BaseCommand):
         except Exception as e:
             await self.send_text(f"❌ 存档操作失败: {str(e)}")
             return False, f"存档操作失败: {str(e)}", True
+    
+    async def _delete_save(self, user_id: str, save_id: str) -> Tuple[bool, Optional[str], bool]:
+        """删除存档"""
+        if not save_id:
+            await self.send_text("❌ 请提供要删除的存档ID")
+            return False, "缺少存档ID", True
+        
+        if save_id not in save_db:
+            await self.send_text("❌ 存档ID不存在")
+            return False, "存档不存在", True
+        
+        save_data = save_db[save_id]
+        user_uid = user_registry[str(user_id)]
+        
+        # 权限检查：只有存档创建者或管理员可以删除
+        if save_data.get('creator_uid') != user_uid and not is_admin(user_id, self.plugin):
+            await self.send_text("❌ 您不是该存档的创建者，无法删除")
+            return False, "权限不足", True
+        
+        # 检查存档状态：只能删除未完成的存档
+        if save_data.get('status') != 'incomplete':
+            await self.send_text("❌ 只能删除未完成的存档")
+            return False, "存档状态错误", True
+        
+        # 执行删除
+        plot_name = save_data['plot_name']
+        delete_save(save_id)
+        
+        await self.send_text(
+            f"🗑️ **存档已删除**\n"
+            f"📁 存档ID: `{save_id}`\n"
+            f"📜 剧本: {plot_name}\n"
+            f"⏰ 删除时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        return True, "存档删除成功", True
     
     async def _save_game(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
         """保存游戏"""
@@ -1325,6 +1408,11 @@ class SaveCommand(BaseCommand):
         # 生成存档ID
         save_id = generate_save_id()
         
+        # 获取KP驱动器状态
+        kp_state = None
+        if current_session["session_id"] in kp_driver.session_states:
+            kp_state = kp_driver.session_states[current_session["session_id"]]
+        
         # 创建存档数据
         save_data = {
             "save_id": save_id,
@@ -1341,7 +1429,8 @@ class SaveCommand(BaseCommand):
             "save_time": datetime.now().isoformat(),
             "creator": current_session["creator"],
             "creator_uid": current_session["creator_uid"],
-            "status": "incomplete"
+            "status": "incomplete",
+            "kp_driver_data": kp_state  # 保存KP状态
         }
         
         # 保存到数据库和文件
@@ -1350,11 +1439,12 @@ class SaveCommand(BaseCommand):
         
         await self.send_text(
             f"💾 **游戏已保存！**\n"
-            f"📁 存档ID: {save_id}\n"
+            f"📁 存档ID: `{save_id}`\n"
             f"📜 剧本: {current_session['plot_name']}\n"
-            f"👥 玩家数: {len(current_session['players'])}\n"
+            f"🤖 KP状态: {'已保存' if kp_state else '未保存'}\n"
             f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"💡 使用 `/load {save_id}` 加载此存档继续游戏"
+            f"💡 使用 `/load {save_id}` 加载此存档继续游戏\n"
+            f"🗑️ 使用 `/save delete {save_id}` 删除此存档"
         )
         
         return True, "游戏保存成功", True
@@ -1382,14 +1472,19 @@ class SaveCommand(BaseCommand):
                 f"👥 {save['player_count']}人 · ⏰ {save_time}\n\n"
             )
         
-        save_list += "💡 使用 `/load 存档ID` 加载存档继续游戏"
+        save_list += (
+            "💡 **操作指南:**\n"
+            f"• 使用 `/load 存档ID` 加载存档继续游戏\n"
+            f"• 使用 `/save delete 存档ID` 删除存档\n"
+            f"• 只有未完成的存档可以删除"
+        )
         
         await self.send_text(save_list)
         return True, "显示存档列表", True
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示存档帮助"""
-        help_text = """💾 **存档命令帮助**
+        help_text = """💾 **存档命令帮助** (增强版)
 
 **保存游戏:**
 `/save` - 保存当前游戏进度
@@ -1397,13 +1492,21 @@ class SaveCommand(BaseCommand):
 **查看存档列表:**
 `/save list` - 查看我的所有存档
 
+**删除存档:**
+`/save delete <存档ID>` - 删除指定存档
+
 **加载存档:**
 `/load <存档ID>` - 加载存档继续游戏
 
-**注意:**
+**权限说明:**
 - 保存游戏需要团长或管理员权限
+- 只能删除自己创建的未完成存档
+- 管理员可以删除任何存档
+
+**注意:**
 - 需要在剧本中使用
-- 存档ID为6位数字，使用 `/save list` 查看"""
+- 存档ID为6位数字，使用 `/save list` 查看
+- 删除操作不可逆，请谨慎使用"""
         await self.send_text(help_text)
         return True, "显示存档帮助", True
 
@@ -1773,12 +1876,12 @@ class RoleCommand(BaseCommand):
         await self.send_text(help_text)
         return True, "显示帮助", True
 
-# === 行动命令 ===
-class ActionCommand(BaseCommand):
-    """行动命令 - 隔离玩家行动"""
+# === 智能行动命令 ===
+class IntelligentActionCommand(BaseCommand):
+    """智能行动命令 - 使用KP驱动器生成剧情"""
     
     command_name = "action"
-    command_description = "执行行动推进剧情"
+    command_description = "执行行动推进剧情（智能KP）"
     command_pattern = r"^/action(?:\s+(?P<action_text>.+))?$"
     intercept_message = True
     
@@ -1815,12 +1918,13 @@ class ActionCommand(BaseCommand):
                 await self.send_text("❌ 剧本尚未开始或已结束")
                 return False, "剧本状态错误", True
             
-            # 推进剧情
-            response = await PlotAdvancer.advance_plot(
-                current_session["session_id"], action_text
+            # 使用KP驱动器生成响应
+            response = await kp_driver.generate_kp_response(
+                current_session["session_id"], 
+                action_text
             )
             
-            await self.send_text(response)
+            await self.send_text(f"📖 **KP叙述**\n\n{response}")
             return True, "行动执行完成", True
             
         except Exception as e:
@@ -1829,36 +1933,31 @@ class ActionCommand(BaseCommand):
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示行动命令帮助"""
-        help_text = """🎯 **行动命令帮助**
+        help_text = """🎯 **行动命令帮助** (智能KP版)
 
 **使用方法:**
 `/action <行动描述>`
 
-**参数说明:**
-- 行动描述: 描述你要执行的具体行动
-
 **示例:**
-`/action 调查桌子上的信件`
-`/action 与守卫对话询问入口`
-`/action 使用医疗包治疗受伤的队友`
-`/action 悄悄潜入房间内部`
+`/action 仔细观察房间的每个角落`
+`/action 尝试用铅笔刀割断绳索`
+`/action 聆听周围的声音`
 
-**行动类型建议:**
-- **探索类:** 调查、搜索、检查、探索
-- **社交类:** 对话、询问、说服、威胁
-- **战斗类:** 攻击、防御、使用技能、准备战斗
-- **解谜类:** 推理、分析、组合物品、尝试解决方案
+**系统特点:**
+- KP在剧本框架内自由发挥生成剧情
+- 回复简洁生动（120字以内）
+- 结合玩家行动创造个性化游戏体验
 
-**注意:**
-- 需要在活跃的剧本中使用
-- 行动会影响剧情发展
-- 使用具体、明确的行动描述效果更好"""
+**提示:**
+- 行动描述越具体，KP的回应越精彩
+- 大胆尝试各种行动方案
+- 注意KP提供的线索和提示"""
         await self.send_text(help_text)
         return True, "显示行动帮助", True
 
-# === 检定命令改进 ===
+# === 检定命令 ===
 class CheckCommand(BaseCommand):
-    """检定命令 - 改进版本"""
+    """检定命令"""
     
     command_name = "check"
     command_description = "进行技能或属性检定"
@@ -2085,7 +2184,7 @@ class CheckCommand(BaseCommand):
     
     async def _show_help(self, user_id: str) -> Tuple[bool, Optional[str], bool]:
         """显示检定帮助"""
-        help_text = """🎲 **检定命令帮助 - 改进版**
+        help_text = """🎲 **检定命令帮助**
 
 **正常检定:**
 `/check <检定类型> [adv|dis]`
@@ -2109,9 +2208,9 @@ class CheckCommand(BaseCommand):
         await self.send_text(help_text)
         return True, "显示检定帮助", True
 
-# === 骰子命令改进 ===
+# === 骰子命令 ===
 class DiceCommand(BaseCommand):
-    """骰子命令 - 改进版本"""
+    """骰子命令"""
     
     command_name = "dice"
     command_description = "掷骰子"
@@ -3049,7 +3148,7 @@ class ItemCommand(BaseCommand):
         await self.send_text(help_text)
         return True, "显示物品帮助", True
 
-# === 剧情推进器（修改为短篇幅）===
+# === 剧情推进器（短篇幅）===
 class PlotAdvancerAction(BaseAction):
     """剧情推进器 - 短篇幅版本"""
     
@@ -3089,13 +3188,9 @@ class PlotAdvancerAction(BaseAction):
             if not current_session:
                 return False, "未找到当前游戏会话"
                 
-            # 调用AI模型推进剧情（短篇幅）
-            plot_response = await self._advance_plot(current_session)
+            # 使用KP驱动器推进剧情
+            plot_response = await kp_driver.generate_kp_response(current_session["session_id"])
             if plot_response:
-                # 限制在85字左右
-                if len(plot_response) > 100:
-                    plot_response = plot_response[:97] + "..."
-                    
                 await self.send_text(f"📖 {plot_response}")
                 current_session['last_activity'] = datetime.now().isoformat()
                 return True, "剧情推进成功"
@@ -3104,52 +3199,6 @@ class PlotAdvancerAction(BaseAction):
                 
         except Exception as e:
             return False, f"剧情推进错误: {str(e)}"
-    
-    async def _advance_plot(self, session: Dict) -> Optional[str]:
-        """使用AI模型推进剧情 - 短篇幅版本"""
-        api_url = self.get_config("llm.api_url")
-        api_key = self.get_config("llm.api_key")
-        model = self.get_config("llm.plot_model")
-        temperature = self.get_config("llm.temperature")
-        
-        prompt = f"""
-你是一位专业的{session['mode'].upper()}跑团主持人。请根据以下信息简短推进剧情（限85字内）：
-
-当前剧本：{session['plot_name']}
-当前进度：{session.get('current_progress', '开始')}
-游戏模式：{session['mode'].upper()}
-
-请生成下一阶段的简短剧情发展，保持原剧本风格。
-回复请使用中文，控制在85字以内，保持简洁生动。
-"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "你是一位专业的TRPG游戏主持人，回复简短精炼"},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": 150  # 限制输出长度
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as http_session:
-                async with http_session.post(api_url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                        # 更新会话进度
-                        session['current_progress'] = "推进剧情"
-                        return content
-        except Exception as e:
-            print(f"AI API调用失败: {e}")
-            
-        return "故事继续发展，前方等待你们的是新的挑战..."
 
 # === 插件主类 ===
 @register_plugin
@@ -3158,7 +3207,7 @@ class TRPGPlugin(BasePlugin):
     
     plugin_name = "TRPG-Master-Plugin"
     plugin_description = "支持CoC和DnD规则的跑团插件，包含完整的角色创建、检定、战斗和剧本系统"
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     plugin_author = "KArabella"
     enable_plugin = True
     
@@ -3206,6 +3255,11 @@ class TRPGPlugin(BasePlugin):
         load_user_registry()
         load_character_db()
         load_save_db()
+        
+        # 初始化KP驱动器，传入插件实例
+        global kp_driver
+        kp_driver = IntelligentKPDriver(self)
+        
         print(f"✅ TRPG插件初始化完成")
     
     def _ensure_config_exists(self):
@@ -3292,10 +3346,10 @@ admin_users = {default_config["admin"]["admin_users"]}
             (StartCommand.get_command_info(), StartCommand),
             (LoadCommand.get_command_info(), LoadCommand),
             (JoinCommand.get_command_info(), JoinCommand),
-            (SaveCommand.get_command_info(), SaveCommand),
+            (EnhancedSaveCommand.get_command_info(), EnhancedSaveCommand),
             (RegisterCommand.get_command_info(), RegisterCommand),
             (RoleCommand.get_command_info(), RoleCommand),
-            (ActionCommand.get_command_info(), ActionCommand),
+            (IntelligentActionCommand.get_command_info(), IntelligentActionCommand),
             (CheckCommand.get_command_info(), CheckCommand),
             (DiceCommand.get_command_info(), DiceCommand),
             (StatusCommand.get_command_info(), StatusCommand),
@@ -3336,3 +3390,8 @@ async def cleanup_old_saves():
 
 # 启动清理任务
 asyncio.create_task(cleanup_old_saves())
+
+# 启动时加载数据
+load_user_registry()
+load_character_db()
+load_save_db()
