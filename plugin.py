@@ -1026,20 +1026,56 @@ class StartCommand(BaseCommand):
             return False, f"开始失败: {str(e)}", True
     
     async def _start_session_after_delay(self, session_id: str):
-        """1分钟后自动开始剧本"""
+        """1分钟后自动开始准备阶段"""
         await asyncio.sleep(60)
         
         if session_id in active_sessions:
             session = active_sessions[session_id]
             if session["status"] == "recruiting":
                 if len(session["players"]) > 0:
-                    session["status"] = "playing"
-                    # 使用KP驱动器生成开场
-                    opening = await kp_driver.generate_kp_response(session_id)
-                    await self.send_text(f"🎉 **游戏开始！**\n\n{opening}")
+                    # 改为进入准备阶段，而不是直接开始游戏
+                    session["status"] = "preparing"
+                    await self.send_text(
+                        f"🎉 **招募结束，进入准备阶段！**\n"
+                        f"📖 剧本: {session['plot_name']}\n"
+                        f"👥 玩家数: {len(session['players'])}人\n\n"
+                        f"请使用 `/role load <RID>` 加载您的角色\n"
+                        f"或使用 `/skip prepare` 跳过准备阶段\n"
+                        f"准备阶段限时5分钟"
+                    )
+                    
+                    # 设置准备阶段超时
+                    asyncio.create_task(self._prepare_phase_timeout(session_id))
                 else:
                     await self.send_text("❌ 没有玩家加入，剧本自动取消")
                     del active_sessions[session_id]
+
+    async def _prepare_phase_timeout(self, session_id: str):
+        """准备阶段超时处理"""
+        await asyncio.sleep(300)  # 5分钟
+        
+        if session_id in active_sessions:
+            session = active_sessions[session_id]
+            if session["status"] == "preparing":
+                # 为没有角色的玩家生成随机角色并开始游戏
+                await self._handle_prepare_timeout(session_id)
+
+    async def _handle_prepare_timeout(self, session_id: str):
+        """处理准备阶段超时"""
+        session = active_sessions[session_id]
+        
+        # 为没有角色的玩家生成随机角色
+        for player in session["players"]:
+            if not player.get("character_rid"):
+                random_char = generate_random_character(session["mode"], f"玩家{player['qq']}")
+                player["character_rid"] = random_char["rid"]
+                player["ready"] = True
+        
+        session["status"] = "playing"
+        await self.send_text(
+            f"⏰ **准备阶段超时，游戏自动开始！**\n"
+            f"使用 `/action <行动描述>` 推进剧情"
+        )
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示开始剧本帮助"""
@@ -1168,40 +1204,45 @@ class LoadCommand(BaseCommand):
             await self.send_text(f"❌ 加载存档失败: {str(e)}")
             return False, f"加载失败: {str(e)}", True
     
-    async def _start_session_after_delay(self, session_id: str):
-        """1分钟后自动开始准备阶段"""
-        await asyncio.sleep(60)
-        
-        if session_id in active_sessions:
-            session = active_sessions[session_id]
-            if session["status"] == "recruiting":
-                if len(session["players"]) > 0:
-                    session["status"] = "playing"
-                    
-                    # 自动为原玩家匹配角色
-                    original_players = session.get("original_players", [])
-                    current_players = session["players"]
-                    
-                    matched_count = 0
-                    for current_player in current_players:
-                        for original_player in original_players:
-                            if current_player["uid"] == original_player.get("uid"):
-                                if original_player.get("character_rid"):
-                                    current_player["character_rid"] = original_player["character_rid"]
-                                    current_player["ready"] = True
-                                    matched_count += 1
-                                    break
-                    
-                    await self.send_text(
-                        f"🎉 **剧本 {session_id} 游戏继续！**\n"
-                        f"📖 剧本: {session['plot_name']}\n"
-                        f"🎮 模式: {session['mode'].upper()}\n"
-                        f"🔗 自动匹配角色: {matched_count}人\n\n"
-                        f"游戏继续！使用 `/action <行动>` 推进剧情"
-                    )
-                else:
-                    await self.send_text("❌ 没有玩家加入，剧本自动取消")
-                    del active_sessions[session_id]
+async def _start_session_after_delay(self, session_id: str):
+    """1分钟后自动开始准备阶段"""
+    await asyncio.sleep(60)
+    
+    if session_id in active_sessions:
+        session = active_sessions[session_id]
+        if session["status"] == "recruiting":
+            if len(session["players"]) > 0:
+                session["status"] = "preparing"
+                
+                # 自动为原玩家匹配角色
+                original_players = session.get("original_players", [])
+                current_players = session["players"]
+                
+                matched_count = 0
+                for current_player in current_players:
+                    for original_player in original_players:
+                        if current_player["uid"] == original_player.get("uid"):
+                            if original_player.get("character_rid"):
+                                current_player["character_rid"] = original_player["character_rid"]
+                                current_player["ready"] = True
+                                matched_count += 1
+                                break
+                
+                await self.send_text(
+                    f"🎉 **加载存档进入准备阶段！**\n"
+                    f"📖 剧本: {session['plot_name']}\n"
+                    f"🔗 自动匹配角色: {matched_count}人\n"
+                    f"👥 总玩家数: {len(current_players)}人\n\n"
+                    f"新玩家请使用 `/role load <RID>` 加载角色\n"
+                    f"或使用 `/skip prepare` 跳过准备阶段\n"
+                    f"准备阶段限时5分钟"
+                )
+                
+                # 设置准备阶段超时
+                asyncio.create_task(self._prepare_phase_timeout(session_id))
+            else:
+                await self.send_text("❌ 没有玩家加入，剧本自动取消")
+                del active_sessions[session_id]
     
     async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
         """显示加载存档帮助"""
@@ -1509,6 +1550,100 @@ class EnhancedSaveCommand(BaseCommand):
 - 删除操作不可逆，请谨慎使用"""
         await self.send_text(help_text)
         return True, "显示存档帮助", True
+
+# === 准备阶段查询命令 ===
+class PrepareStatusCommand(BaseCommand):
+    """准备阶段状态查询命令"""
+    
+    command_name = "prepare"
+    command_description = "查看准备阶段状态"
+    command_pattern = r"^/prepare(?:\s+status)?(?:\s+help)?$"
+    intercept_message = True
+    
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            user_id = self.message.message_info.user_info.user_id
+            
+            # 处理help参数
+            if hasattr(self, 'matched_groups') and self.matched_groups and self.matched_groups.get(0) == "help":
+                return await self._show_help()
+                
+            # 检查用户注册
+            registered, msg = check_user_registered(user_id)
+            if not registered:
+                await self.send_text(msg)
+                return False, "用户未注册", True
+                
+            # 查找用户当前会话
+            current_session = None
+            for session in active_sessions.values():
+                if any(player["qq"] == user_id for player in session["players"]):
+                    current_session = session
+                    break
+                    
+            if not current_session:
+                await self.send_text("❌ 您没有在活跃的剧本中")
+                return False, "无会话", True
+                
+            if current_session["status"] != "preparing":
+                await self.send_text("❌ 当前不在准备阶段")
+                return False, "不在准备阶段", True
+            
+            # 显示准备阶段状态
+            ready_players = []
+            not_ready_players = []
+            
+            for player in current_session["players"]:
+                if player.get("ready"):
+                    character = character_db.get(player["character_rid"], {})
+                    ready_players.append(f"{player['qq']} - {character.get('name', '无角色')}")
+                else:
+                    not_ready_players.append(f"{player['qq']} - 未准备")
+            
+            status_text = (
+                f"📋 **准备阶段状态**\n"
+                f"📖 剧本: {current_session['plot_name']}\n"
+                f"🎮 模式: {current_session['mode'].upper()}\n"
+                f"👥 玩家: {len(current_session['players'])}人\n\n"
+            )
+            
+            if ready_players:
+                status_text += f"✅ **已准备:**\n" + "\n".join([f"  • {p}" for p in ready_players]) + "\n\n"
+            
+            if not_ready_players:
+                status_text += f"⏳ **未准备:**\n" + "\n".join([f"  • {p}" for p in not_ready_players]) + "\n\n"
+            
+            status_text += (
+                f"💡 **命令提示:**\n"
+                f"• 使用 `/role load RID` 加载角色\n"
+                f"• 使用 `/skip prepare` 跳过准备阶段\n"
+                f"• 使用 `/role list` 查看您的角色"
+            )
+            
+            await self.send_text(status_text)
+            return True, "显示准备阶段状态", True
+            
+        except Exception as e:
+            await self.send_text(f"❌ 查询准备状态失败: {str(e)}")
+            return False, f"查询失败: {str(e)}", True
+    
+    async def _show_help(self) -> Tuple[bool, Optional[str], bool]:
+        """显示准备阶段状态帮助"""
+        help_text = """📋 **准备阶段状态命令帮助**
+
+**使用方法:**
+`/prepare` 或 `/prepare status` - 查看当前准备阶段状态
+
+**显示内容:**
+- 已准备的玩家和角色
+- 未准备的玩家
+- 剧本基本信息
+
+**注意:**
+- 需要在准备阶段使用
+- 只有加入剧本的玩家可以查看"""
+        await self.send_text(help_text)
+        return True, "显示准备阶段状态帮助", True
 
 # === 注册命令 ===
 class RegisterCommand(BaseCommand):
@@ -3359,6 +3494,7 @@ admin_users = {default_config["admin"]["admin_users"]}
             (CombatCommand.get_command_info(), CombatCommand),
             (NPCCommand.get_command_info(), NPCCommand),
             (ItemCommand.get_command_info(), ItemCommand),
+            (PrepareStatusCommand.get_command_info(), PrepareStatusCommand),
             (PlotAdvancerAction.get_action_info(), PlotAdvancerAction)
         ]
         print(f"📋 TRPG插件注册了 {len(components)} 个组件")
